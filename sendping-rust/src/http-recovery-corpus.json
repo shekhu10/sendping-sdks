@@ -1,0 +1,19 @@
+[
+  {"name":"partial batch list","method":"POST","path":"/emails/batch","status":429,"body":{"name":"daily_quota_exceeded","sent":[{"id":"em_sent"}]},"attempts":1},
+  {"name":"partial batch count","method":"POST","path":"/emails/batch","status":503,"body":{"name":"batch_incomplete","sent_count":1},"attempts":1},
+  {"name":"reserved but unconfirmed prefix","method":"POST","path":"/emails/batch","status":503,"body":{"name":"service_unavailable","sent":[],"reserved":[{"id":"em_uncertain"}],"unsent_count":2},"attempts":1},
+  {"name":"terminal incomplete batch with no sends","method":"POST","path":"/emails/batch","status":503,"body":{"name":"batch_incomplete","sent":[],"sent_count":0,"unsent_count":3},"attempts":1},
+  {"name":"single uncertain send","method":"POST","path":"/emails","status":422,"body":{"name":"validation_error","id":"em_uncertain"},"attempts":1},
+  {"name":"in-flight reservation","method":"POST","path":"/emails","status":409,"body":{"name":"concurrent_idempotent_requests"},"attempts":1},
+  {"name":"ordinary rate limit","method":"POST","path":"/emails","status":429,"body":{"name":"rate_limit_exceeded"},"attempts":2},
+  {"name":"GET proxy outage","method":"GET","path":"/domains","status":503,"body":"proxy unavailable","attempts":2},
+  {"name":"unkeyed POST proxy outage","method":"POST","path":"/emails","status":503,"body":"proxy unavailable","attempts":1},
+  {"name":"documented pre-application failure","method":"POST","path":"/emails","status":503,"body":{"name":"sending_configuration_unavailable"},"attempts":2},
+  {"name":"keyed send proxy outage","method":"POST","path":"/emails","key":"operation-1","status":503,"body":"proxy unavailable","attempts":2},
+  {"name":"unsupported key cannot protect event writes","method":"POST","path":"/events","key":"operation-1","status":503,"body":"proxy unavailable","attempts":1},
+  {"name":"keyed partial result is terminal","method":"POST","path":"/emails/batch","key":"operation-1","status":429,"body":{"name":"daily_quota_exceeded","sent_count":1,"sent":[{"id":"em_sent"}]},"attempts":1},
+  {"name":"unknown service error never retries","method":"POST","path":"/emails","key":"operation-1","status":500,"body":{"name":"application_error"},"attempts":1},
+  {"name":"unknown reserved item shape still stops retries","method":"POST","path":"/emails/batch","status":503,"body":{"name":"service_unavailable","reserved":[{"id":7}]},"attempts":1},
+  {"name":"positive noninteger progress still stops retries","method":"POST","path":"/emails/batch","status":503,"body":{"name":"service_unavailable","sent_count":0.5},"attempts":1},
+  {"name":"malformed embedded status preserves recovery details","method":"POST","path":"/emails/batch","key":"operation-1","status":503,"body":{"statusCode":"bad","name":"service_unavailable","reserved":[{"id":"em_uncertain"}]},"attempts":1}
+]

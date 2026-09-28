@@ -1,0 +1,314 @@
+# Release: publish every SDK to its registry when a version tag is pushed
+# (`git tag v1.0.0 && git push origin v1.0.0`) or on manual dispatch.
+#
+# Jobs are independent — a registry whose credentials aren't configured yet
+# simply fails alone; add its secret and re-run just that job. Credentials:
+#   npm       secrets.NPM_TOKEN            (granular automation token, publish
+#             scope; the cli job waits for the sdk publish)
+#   PyPI      NO secret — configure GitHub Trusted Publishing on pypi.org
+#             (pending publisher: repo shekhu10/sendping-sdks,
+#              workflow release.yml, environment blank)
+#   RubyGems  secrets.RUBYGEMS_API_KEY     (push scope; account has MFA)
+#   crates.io secrets.CARGO_REGISTRY_TOKEN (publish-new + publish-update)
+#   NuGet     NO secret — Trusted Publishing on nuget.org (repo
+#             shekhu10/sendping-sdks, workflow release.yml) + repo VARIABLE
+#             NUGET_USER = your nuget.org username (NuGet/login exchanges OIDC
+#             for a short-lived key)
+#   Maven     secrets.CENTRAL_USERNAME / CENTRAL_PASSWORD (central.sonatype.com
+#             portal token) + GPG_PRIVATE_KEY / GPG_PASSPHRASE (armored key)
+#   Go        NO secret — the `go-tag` job pushes the sendping-go/vX.Y.Z
+#             sub-tag the Go module proxy needs (repo must be PUBLIC)
+#   Packagist secrets.PHP_MIRROR_DEPLOY_KEY (write deploy key on the
+#             read-only mirror github.com/shekhu10/sendping-php) — Packagist
+#             cannot read a monorepo subdirectory, so the packagist-split job
+#             pushes the subtree split + tag to the mirror; the Packagist
+#             webhook on the mirror then updates packagist.org automatically
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      only:
+        description: >-
+          Publish ONE job only (npm-sdk, npm-cli, pypi, rubygems, crates,
+          nuget, maven-central, packagist-split, go-tag). Leave blank to run
+          the whole release. This is the recovery path for a PARTIAL release:
+          registries are append-only, so once a version is published there is
+          no way to re-run the whole tag without every succeeded job failing
+          on a duplicate version.
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  # Version guard. EVERY publish job below `needs` this one, and it deliberately
+  # carries no `only` filter — a targeted re-run of a single registry is exactly
+  # the situation where a hand-edited version slips through. It must stay ahead
+  # of every publish: registries are append-only, so a version check that runs
+  # afterwards reports a fact nobody can act on.
+  versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      # On a tag push this asserts the SDKs publish exactly what the tag says
+      # (v2.0.1 -> 2.0.1). A workflow_dispatch against a branch has no tag to
+      # check against, so it falls back to internal consistency only — same as
+      # sdks.yml. Run it locally with: node scripts/check-versions.mjs v2.0.1
+      - run: node scripts/check-versions.mjs "$TAG"
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+
+  npm-sdk:
+    needs: versions
+    if: inputs.only == '' || inputs.only == 'npm-sdk'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm provenance attestation
+    defaults: { run: { working-directory: sendping-npm } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', registry-url: 'https://registry.npmjs.org' }
+      - run: npm install
+      # Same gate as sdks.yml: `npm test` runs through tsx, which strips types
+      # without checking them, so the suite's `@ts-expect-error` absence
+      # assertions (apiKeys.create/update/remove must not exist) are inert
+      # without this step. sdks.yml does not run on tags, so if this job does
+      # not type-check the tests, nothing on the release path does.
+      - run: npm run typecheck:test
+      - run: npm test
+      - run: npm publish --provenance --access public
+        env: { NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}' }
+
+  npm-cli:
+    # Publishes after the SDK so `sendping@^2.0.0` is resolvable.
+    needs: [versions, npm-sdk]
+    # `needs` alone would SKIP this job when npm-sdk is skipped by a
+    # targeted dispatch, which is exactly the case we need it to run in.
+    # `!cancelled()` also defeats the implicit "skip if a dependency failed",
+    # so the version gate has to be named explicitly — otherwise a failed
+    # `versions` job would leave this the one job that still publishes.
+    if: >-
+      !cancelled()
+      && needs.versions.result == 'success'
+      && (inputs.only == '' || inputs.only == 'npm-cli')
+      && (needs.npm-sdk.result == 'success' || needs.npm-sdk.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    defaults: { run: { working-directory: sendping-cli } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', registry-url: 'https://registry.npmjs.org' }
+      - name: Wait for THIS release's sendping on the registry
+        # Must poll for the exact version just published, not merely for the
+        # package: `npm view sendping version` succeeds against whatever is
+        # already on the registry, so a bare existence check returns instantly
+        # and the CLI's `npm install` can still race registry propagation.
+        run: |
+          VERSION=$(node -p "require('../sendping-npm/package.json').version")
+          for i in $(seq 1 30); do
+            if [ "$(npm view "sendping@${VERSION}" version 2>/dev/null)" = "${VERSION}" ]; then
+              echo "sendping@${VERSION} is visible on npm"; exit 0
+            fi
+            sleep 10
+          done
+          echo "sendping@${VERSION} not visible on npm after 5m" >&2; exit 1
+      - run: npm install
+      - run: npm test
+      - run: npm publish --provenance --access public
+        env: { NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}' }
+
+  pypi:
+    needs: versions
+    if: inputs.only == '' || inputs.only == 'pypi'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # PyPI Trusted Publishing (OIDC) — no token secret
+    defaults: { run: { working-directory: sendping-python } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: python -m unittest discover -s tests -t .
+      - run: pipx run build
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with: { packages-dir: sendping-python/dist }
+
+  rubygems:
+    needs: versions
+    if: inputs.only == '' || inputs.only == 'rubygems'
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: sendping-ruby } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with: { ruby-version: '3.3' }
+      - run: ruby -Ilib -Itest -e 'Dir["test/*_test.rb"].each { |f| require File.expand_path(f) }'
+      - run: gem build sendping.gemspec
+      - name: Push to RubyGems
+        run: |
+          mkdir -p ~/.gem
+          printf -- "---\n:rubygems_api_key: %s\n" "$GEM_HOST_API_KEY" > ~/.gem/credentials
+          chmod 0600 ~/.gem/credentials
+          gem push sendping-*.gem
+        env: { GEM_HOST_API_KEY: '${{ secrets.RUBYGEMS_API_KEY }}' }
+
+  crates:
+    needs: versions
+    if: inputs.only == '' || inputs.only == 'crates'
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: sendping-rust } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
+      - run: cargo publish --no-verify
+        env: { CARGO_REGISTRY_TOKEN: '${{ secrets.CARGO_REGISTRY_TOKEN }}' }
+
+  nuget:
+    needs: versions
+    if: inputs.only == '' || inputs.only == 'nuget'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # NuGet Trusted Publishing (OIDC)
+    defaults: { run: { working-directory: sendping-dotnet } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: '8.0.x' }
+      - run: dotnet test tests/SendPing.Tests/SendPing.Tests.csproj
+      - run: dotnet pack src/SendPing/SendPing.csproj -c Release -o out
+      # Exchanges the GitHub OIDC token for a short-lived NuGet API key under
+      # the trusted-publishing policy owned by vars.NUGET_USER (repo variable =
+      # your nuget.org username).
+      - name: NuGet trusted-publishing login
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ vars.NUGET_USER }}
+      - run: dotnet nuget push "out/*.nupkg" --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+  maven-central:
+    needs: versions
+    if: inputs.only == '' || inputs.only == 'maven-central'
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: sendping-java } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          server-id: central
+          server-username: CENTRAL_USERNAME
+          server-password: CENTRAL_PASSWORD
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: GPG_PASSPHRASE
+      - run: mvn -B -q compile test-compile
+      - run: java -cp target/classes:target/test-classes co.sendping.tests.AllTests
+      - run: mvn -B -P release deploy
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+
+  packagist-split:
+    # Packagist requires composer.json at the REPO ROOT, so mirror the PHP
+    # package to the read-only split repo shekhu10/sendping-php and tag it
+    # with the release version. Auth is a write deploy key scoped to ONLY that
+    # repo (secret PHP_MIRROR_DEPLOY_KEY). The push then fires the Packagist
+    # webhook installed on the mirror, so the new version appears on
+    # packagist.org automatically — no manual "Update" click.
+    # Still tag-only (it derives the version from the ref), but a targeted
+    # dispatch against a TAG ref can re-run just this job after a partial
+    # release.
+    needs: versions
+    if: >-
+      startsWith(github.ref, 'refs/tags/v')
+      && (inputs.only == '' || inputs.only == 'packagist-split')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: shivammathur/setup-php@v2
+        with: { php-version: '8.3' }
+      # This push IS the PHP publish (the mirror's webhook updates Packagist),
+      # so gate it on the suite the way every other registry job does. Composer
+      # is not used — `php tests/run.php` is the entrypoint.
+      - name: Lint and test the PHP package
+        run: php -l src/Transport/CurlTransport.php && php tests/run.php
+        working-directory: sendping-php
+      - name: Split sendping-php and push to the mirror
+        run: |
+          git config user.name "sendping-release-bot"
+          git config user.email "support@sendping.co"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$PHP_MIRROR_DEPLOY_KEY" > ~/.ssh/php_mirror
+          chmod 600 ~/.ssh/php_mirror
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/php_mirror -o IdentitiesOnly=yes"
+          SPLIT_SHA=$(git subtree split --prefix=sendping-php)
+          git push -f git@github.com:shekhu10/sendping-php.git \
+            "${SPLIT_SHA}:refs/heads/main" "${SPLIT_SHA}:refs/tags/${GITHUB_REF_NAME}"
+        env:
+          PHP_MIRROR_DEPLOY_KEY: ${{ secrets.PHP_MIRROR_DEPLOY_KEY }}
+
+  go-tag:
+    # Go modules install straight from git: the proxy needs a
+    # `sendping-go/vX.Y.Z` tag for the subdirectory module. Derive it from
+    # the release tag and push it (idempotent if it already exists).
+    # Tag-only for the same reason as packagist-split; dispatch against a TAG
+    # ref to re-run it alone.
+    needs: versions
+    if: >-
+      startsWith(github.ref, 'refs/tags/v')
+      && (inputs.only == '' || inputs.only == 'go-tag')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: 'stable' }
+      # Pushing this tag IS the Go publish, and a version cached by
+      # proxy.golang.org can never be replaced or deleted — only retracted by a
+      # later release. It is the least reversible publish in this workflow, so
+      # gate it on the same build+test every other registry job runs.
+      - name: Build and test the Go module
+        run: go build ./... && go test ./...
+        working-directory: sendping-go
+      - name: Push subdirectory tag for the Go module
+        run: |
+          VERSION="${GITHUB_REF_NAME}"                # e.g. v1.0.0
+          TAG="sendping-go/${VERSION}"
+          # Ask the remote, not the local clone: actions/checkout fetches only
+          # the ref being built, so a local rev-parse never sees an existing
+          # sub-tag and the push below would fail on a re-run.
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "${TAG} already exists"; exit 0
+          fi
+          git tag "${TAG}" "${GITHUB_SHA}"
+          git push origin "${TAG}"
+      - name: Nudge the Go module proxy
+        # The proxy path must carry the module's major suffix, which go.mod
+        # declares (…/sendping-go/v2 from 2.0.0 on). Derive it from go.mod
+        # rather than hard-coding, so the next major does not silently warm the
+        # wrong path — the UNSUFFIXED path still resolves and would keep
+        # serving v1.3.0, which is a much quieter failure than a 404.
+        run: |
+          MODULE="$(awk '/^module /{print $2}' sendping-go/go.mod)"
+          echo "module path: ${MODULE}"
+          curl -fsS "https://proxy.golang.org/${MODULE}/@v/${GITHUB_REF_NAME}.info" || true

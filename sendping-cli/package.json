@@ -1,0 +1,43 @@
+{
+  "name": "sendping-cli",
+  "version": "1.0.0",
+  "description": "Official command-line interface for the SendPing email API.",
+  "keywords": [
+    "sendping",
+    "email",
+    "cli",
+    "api",
+    "transactional"
+  ],
+  "license": "MIT",
+  "author": "SendPing",
+  "homepage": "https://www.sendping.co",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shekhu10/sendping-sdks.git",
+    "directory": "sendping-cli"
+  },
+  "bugs": {
+    "url": "https://github.com/shekhu10/sendping-sdks/issues"
+  },
+  "bin": {
+    "sendping": "bin/sendping.js"
+  },
+  "main": "src/cli.js",
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "sendping": "^1.0.0"
+  }
+}

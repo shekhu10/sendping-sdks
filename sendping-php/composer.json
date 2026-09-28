@@ -1,0 +1,24 @@
+{
+    "name": "sendping/sendping",
+    "description": "Official SendPing PHP SDK — send transactional and marketing email from your own verified domain.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": ["sendping", "email", "api", "sdk", "transactional", "marketing"],
+    "homepage": "https://www.sendping.co",
+    "require": {
+        "php": "^8.1",
+        "ext-curl": "*",
+        "ext-json": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "SendPing\\": "src/"
+        }
+    },
+    "scripts": {
+        "test": "php tests/run.php"
+    },
+    "support": {
+        "docs": "https://www.sendping.co/docs"
+    }
+}

@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+# `pipx run build` — the release job's own command — writes these into the
+# package root. Untracked and unignored, they show up in `git status` and a
+# `git add -A` before tagging commits build output into the release commit.
+build/
+dist/
+*.egg-info/

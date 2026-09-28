@@ -1,0 +1,126 @@
+name: SDKs
+
+# Test every language SDK on its own toolchain. Java (Maven) and Rust (cargo)
+# are included so the two SDKs that can't be built without their toolchains are
+# verified in CI, not just locally.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Internal-consistency half of the version guard: every version coordinate
+  # across the 9 SDKs must agree with every other one. No tag argument here —
+  # this workflow does not run on tags; release.yml runs the same script WITH
+  # the tag, before any publish job.
+  versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: node scripts/check-versions.mjs
+
+  npm:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: sendping-npm } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm install
+      - run: npm run build
+      # `npm test` runs through tsx, which strips types without checking them,
+      # and tsconfig.json covers `src` only — so the test suite's
+      # `@ts-expect-error` assertions (apiKeys.create/update/remove must not
+      # exist; emails.list rows must not have `status`) are inert without this
+      # step. It is what makes those absences a build error, not just a
+      # runtime assertion.
+      - run: npm run typecheck:test
+      - run: npm test
+
+  cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      # The CLI depends on the published `sendping` package, but CI must test
+      # against THIS commit's SDK — build it and install it from the local
+      # folder (--no-save leaves the declared `sendping` range in
+      # sendping-cli/package.json untouched).
+      - name: Build the npm SDK dependency
+        run: npm install && npm run build
+        working-directory: sendping-npm
+      - name: Install & test CLI against the local SDK
+        run: npm install --no-save ../sendping-npm && npm test
+        working-directory: sendping-cli
+
+  python:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: sendping-python } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: python -m unittest discover -s tests -t .
+
+  ruby:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: sendping-ruby } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with: { ruby-version: '3.3' }
+      - run: ruby -Ilib -Itest -e 'Dir["test/*_test.rb"].each { |f| require File.expand_path(f) }'
+
+  java:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: sendping-java } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: 'temurin', java-version: '21', cache: 'maven' }
+      # pom sets skipTests=true (the SDK uses a custom no-JUnit harness), so
+      # compile then run AllTests.main directly; it System.exit(1)s on failure.
+      - run: mvn -B -q compile test-compile
+      - run: java -cp target/classes:target/test-classes co.sendping.tests.AllTests
+
+  php:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: sendping-php } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with: { php-version: '8.3' }
+      - run: php -l src/Transport/CurlTransport.php
+      - run: php tests/run.php
+
+  go:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: sendping-go } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: 'stable' }
+      - run: go build ./...
+      - run: go test ./...
+
+  rust:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: sendping-rust } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --verbose
+      - run: cargo test --verbose
+
+  dotnet:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: sendping-dotnet } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: '8.0.x' }
+      - run: dotnet test tests/SendPing.Tests/SendPing.Tests.csproj

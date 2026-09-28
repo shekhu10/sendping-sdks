@@ -1,0 +1,24 @@
+{
+  // The runtime test run (`npm test`) goes through tsx, which STRIPS types
+  // rather than checking them — so nothing in tsconfig.json (which includes
+  // `src` only) ever type-checks `test/`. Several tests assert type-level
+  // facts with `@ts-expect-error`: that `mb.apiKeys.create/update/remove` do
+  // not exist (key lifecycle is dashboard-only) and that `emails.list()` rows
+  // have no `status`. Those directives are inert unless something runs tsc
+  // over the test files, which is what `npm run typecheck:test` does.
+  //
+  // `module` is ES2022 here (not CommonJS as in the build) because the tests
+  // use `import.meta.url`.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true
+  },
+  "include": ["src/**/*", "test/**/*"]
+}
